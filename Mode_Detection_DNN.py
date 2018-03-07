@@ -13,7 +13,10 @@ import time
 import pandas as pd
 import tensorflow as tf
 from tensorflow.python.framework import ops
+from sklearn.preprocessing import normalize
 import math
+from sklearn.model_selection import train_test_split
+
 #import matplotlib.pyplot as plt
 #from sklearn.model_selection import KFold
 #==============================================================================
@@ -28,44 +31,98 @@ start_time = time.time()
 ####################Setting  parameters#########################
 #number of point per each segment
 seg_size = 70
-#number of nodes per each layer ('np.repeat' function is used)
+#number of nodes per each layer ('np
+
+
+# .repeat' function is used)
 #the default is 65 layers (without the output layer)
-layer_nods = np.repeat([k for k in range(seg_size,5,-5)],5).tolist()
+layer_nods = [70,22]
+    #np.repeat([k for k in range(seg_size,5,-10)],1).tolist()
 #number of classes, i.e. number of modes (here: 'walk','bike','car','public transit','car and public transit')
 num_classes = 5
+num_channels = 3
+
+points_table = "segment_trip_id_cleaned_valid_btw_home_work_study"
+labels_table = "mode_activity_trip_cleaned_valid_btw_home_work_study"
 
 #############Make connection to the PostgreSQL database##########
 db_conn = psycopg2.connect(user='postgres', password='postgresql', host='localhost', port=5432, database='MtlTrajet_tout_July2017')
 db_conn.autocommit = True
 db_cur = db_conn.cursor()
 
-####################Read the point and labels data#########################
-points_table = "points"
-query = """SELECT * FROM {} 
-where uuid in
-(select distinct(uuid) from {} order by uuid )
-order by uuid, trip_id, timestamp 
-;"""
-#'points','com_names' in follwoing commands are panda dataframe type
-points = pd.read_sql_query(query.format(points_table,points_table),con=db_conn)
-
-#read the column names of points table
-query ="""
-select column_name from information_schema.columns where table_name = '{}';
-"""
-col_names = pd.read_sql_query(query.format(points_table),con=db_conn)
 
 
-#read the label data
-labels_table = "labels"
-query = "SELECT uid,trip_id,mode FROM {};"
-labels = pd.read_sql_query(query.format(labels_table),con=db_conn)
+def read_db(points_table, labels_table):
+    """
 
-#Calculate the number of points along each trip in pandas dataframe
-num_points_per_trip = points.groupby(['uuid', 'trip_id']).size().reset_index(name='counts')
+    :param point_table:
+    :param labels_table:
+    :return: pandas dataframes 'points', 'labels'
+    """
+    query = """SELECT * FROM {} where uuid = '8EEF93ED-5641-463D-947D-A8CBC2F0C57D' and trip_id = 29
+    	
+
+    """
+    """
+    order by uuid, trip_id, timestamp limit 24000
+    
+    
+    select * from {} where mode in (
+    select mode from {}
+    group by mode having count(*) > 1
+)
+    
+    where (uuid = '001DCAB0-2E98-42E2-85EB-CF297A3534EF'
+    	and trip_id = 10) or (uuid = '001DCAB0-2E98-42E2-85EB-CF297A3534EF'
+    	and trip_id = 19)
+    	
+    where uuid in
+    (select distinct(uuid) from {} order by uuid)
+    order by uuid, trip_id, timestamp
+    ;"""
+    #'points','com_names' in follwoing commands are panda dataframe type
+    points = pd.read_sql_query(query.format(points_table),con=db_conn)
+
+
+
+    #read the label data
+    query = "SELECT uid,trip_id,mode FROM {};"
+    labels = pd.read_sql_query(query.format(labels_table),con=db_conn)
+
+
+
+    num_points_per_trip = points.groupby(['uuid', 'trip_id']).size().reset_index(name='counts')
+    print('total number of points is:',num_points_per_trip['counts'].sum())
+
+    return points, labels, num_points_per_trip
+
+# ####################Read the point and labels data#########################
+# points_table = "points"
+# query = """SELECT * FROM {}
+# where uuid in
+# (select distinct(uuid) from {} order by uuid )
+# order by uuid, trip_id, timestamp
+# ;"""
+# #'points','com_names' in follwoing commands are panda dataframe type
+# points = pd.read_sql_query(query.format(points_table,points_table),con=db_conn)
+#
+# #read the column names of points table
+# query ="""
+# select column_name from information_schema.columns where table_name = '{}';
+# """
+# col_names = pd.read_sql_query(query.format(points_table),con=db_conn)
+#
+#
+# #read the label data
+# labels_table = "labels"
+# query = "SELECT uid,trip_id,mode FROM {};"
+# labels = pd.read_sql_query(query.format(labels_table),con=db_conn)
+#
+# #Calculate the number of points along each trip in pandas dataframe
+# num_points_per_trip = points.groupby(['uuid', 'trip_id']).size().reset_index(name='counts')
 
 #############create new dataframe with fixed size segments##########
-def segmentation(points,seg_size):
+def segmentation(points, seg_size,num_points_per_trip):
     i=0
     points_segmented = pd.DataFrame()
     #give same size for each segment
@@ -73,37 +130,66 @@ def segmentation(points,seg_size):
         segment_counter = 0
         trip = points.loc[(points['uuid'] == row[0]) & (points['trip_id'] == row[1])]
         num_segs = math.ceil(row[2]/seg_size)
-        #for loop for splitting the points of a trip into seprate 'seg_size' segments.
-        for j in range(1,num_segs + 1):
+
+        padding = (-trip.shape[0]) % seg_size
+        splitted_trip= np.array_split(np.concatenate((trip, np.zeros((padding, trip.shape[1])))), num_segs)
+        for j in range(0, num_segs):
             segment_counter += 1
-            b_loc = (j-1)*seg_size
-            e_loc = (j-1)*seg_size + (seg_size)
-            if j == num_segs and row[2]%seg_size != 0:
-                e_loc = row[2]
-                trip = trip.assign(segment_id=segment_counter)
-                temp = pd.DataFrame(0, index=np.arange(seg_size), columns=list(trip.columns.values))
-                temp.iloc[0:row[2]%seg_size] = trip.iloc[b_loc:e_loc]
-                points_segmented = points_segmented.append(temp, ignore_index=False)
-                continue
-            trip = trip.assign(segment_id = segment_counter)
-            points_segmented = points_segmented.append(trip.iloc[b_loc:e_loc], ignore_index=False)
+            trip = pd.DataFrame(data = splitted_trip[j],  columns=points.columns.values)
+            trip = trip.assign(segment_id=segment_counter)
+            points_segmented = points_segmented.append(trip, ignore_index=False)
+
+        #for loop for splitting the points of a trip into seprate 'seg_size' segments.
+        # for j in range(1,num_segs + 1):
+        #
+        #     segment_counter += 1
+        #
+        #     b_loc = (j-1)*seg_size
+        #     e_loc = (j-1)*seg_size + (seg_size)
+        #     if j == num_segs and row[2]%seg_size != 0:
+        #         print('j is', j)
+        #         print('segment_counter is', segment_counter)
+        #         e_loc = row[2]
+        #         trip = trip.assign(segment_id=segment_counter)
+        #         temp = pd.DataFrame(0, index=np.arange(seg_size), columns=list(trip.columns.values))
+        #         print(temp.shape)
+        #         print(b_loc,e_loc)
+        #         print(0,row[2]%seg_size)
+        #         temp.iloc[0:row[2]%seg_size] = trip.iloc[b_loc:e_loc]
+        #
+        #         #print('temp is', temp)
+        #         #print('trip is', trip)
+        #         points_segmented = points_segmented.append(temp, ignore_index=False)
+        #         print(points_segmented.shape)
+        #         #print('points_segmented is:', points_segmented[b_loc:e_loc])
+        #         print(temp)
+        #         time.sleep(20)
+        #
+        #         continue
+        #
+        #     trip = trip.assign(segment_id=segment_counter)
+        #     temp = pd.DataFrame(0, index=np.arange(seg_size), columns=list(trip.columns.values))
+        #     temp.iloc[0:row[2] % seg_size] = trip.iloc[b_loc:e_loc]
+        #     points_segmented = points_segmented.append(trip.iloc[b_loc:e_loc], ignore_index=False)
     #drop trips with na or zero values in 'uuid','trip_id','segment_id'
     points_segmented = points_segmented.dropna(subset=['uuid','trip_id','segment_id'])
     points_segmented = points_segmented[(points_segmented['uuid'] != 0) &
                                         (points_segmented['trip_id'] != 0) &
                                         (points_segmented['segment_id'] != 0)]
+
+
+
     return points_segmented
 
 #############Preparing the X and Y data to feed to neural net##########
-def XY_preparation(points_segmented,seg_size):
+def XY_preparation(points_segmented, labels, seg_size,num_channels):
     # Flatten the training and test sets
     num_segements = points_segmented.drop_duplicates(subset=('uuid','trip_id', 'segment_id'), keep='first', inplace=False).shape[0]
     uuid_trip_id_segments = points_segmented.drop_duplicates(subset=('uuid','trip_id', 'segment_id'), keep='first', inplace=False)[['uuid','trip_id', 'segment_id']]
 
     #creating X_orig and Y_orig arrays
-    num_channels = 3
     X_orig = np.zeros((num_segements, seg_size, num_channels))
-    X_orig[X_orig == 0] = -20000
+    X_orig[X_orig == 0] = -20000000
     Y_orig = np.zeros(num_segements, dtype=int)
     #number of points along each trip
     #print(uuid_trip_id_segments.shape)
@@ -117,14 +203,18 @@ def XY_preparation(points_segmented,seg_size):
         #aasing the labels to each segment
         label = labels.loc[(labels['uid'] == row[0]) & (labels['trip_id'] == row[1])]
         label = np.array(label, dtype=pd.Series)
+
         if math.isnan(label[0][2]) or label[0][2] > 4:
             continue
         #copy the speed, distance and time interval btw each pair of points X_orig
         X_orig[i,0:trip.shape[0]] = trip[['time_interval','distance_prev_point','speed']]
 
         # copy the the mode of transport to the Y_orig
-        Y_orig[i] = int(label[0][2])
+        Y_orig[i] = int(trip['mode'][0])
         i += 1
+
+    # np.save("DNN_labels_data", Y_orig)
+    # np.save("DNN_segmented_data", X_orig)
 
     return(X_orig,Y_orig)
 
@@ -227,19 +317,40 @@ def padding(points, padding_size,labels):
 ######################flattening the channels######################
 def flattening_data(X_orig):
     # Flatten the training and test sets
+
+    # X_orig[:, :, 1] = normalize(X_orig[:, :, 1], axis=0).ravel()
+    # X_orig[:, :, 2] = normalize(X_orig[:, :, 2], axis=1).ravel()
+    # X_orig[:, :, 3] = normalize(X_orig[:, :, 3], axis=1).ravel()
+    # print(X_orig)
+    # time.sleep(100)
+    print('X_orig.shape[0]', X_orig.shape[0])
+    #X_train_flatten = X_orig.flatten('F').T
+
     X_train_flatten = X_orig.reshape(X_orig.shape[0], -1).T
+    #print('X_orig',type(X_orig))
+    #print('X_train_flatten',X_train_flatten)
+
     return (X_train_flatten)
 
-######################split data to train-test######################
-def split_train_test(X_flatten, Y_orig):
-    training_idx = np.random.rand(X_flatten.shape[1]) < 0.7
-    X_train_orig = X_flatten[:,training_idx]
-    X_test_orig = X_flatten[:, ~training_idx]
-    Y_train_orig = Y_orig[training_idx]
-    Y_test_orig = Y_orig[~training_idx]
-    #print("shape is : ",X_train_orig.shape, X_test_orig.shape, Y_train_orig.shape, Y_test_orig.shape)
-    #print("shape is : ", Y_test_orig)
-    return (X_train_orig, X_test_orig, Y_train_orig, Y_test_orig)
+#####################split data to train-test######################
+# def split_train_test(X_flatten, Y_orig):
+#     training_idx = np.random.rand(X_flatten.shape[1]) < 0.8
+#     X_train_orig = X_flatten[:,training_idx]
+#     X_test_orig = X_flatten[:, ~training_idx]
+#     Y_train_orig = Y_orig[training_idx]
+#     Y_test_orig = Y_orig[~training_idx]
+#     #print("shape is : ",X_train_orig.shape, X_test_orig.shape, Y_train_orig.shape, Y_test_orig.shape)
+#     #print("shape is : ", Y_test_orig)
+#     return (X_train_orig, X_test_orig, Y_train_orig, Y_test_orig)
+
+def split_train_test(X_train_flatten, Y_orig):
+    #print(X_train_flatten.shape)
+    #print(Y_orig.shape)
+    X_train_orig, X_test_orig, Y_train_orig, Y_test_orig = train_test_split(X_train_flatten.T, Y_orig, test_size = 0.20, random_state = None)
+    print('shape X_train_orig.T',X_train_orig,X_train_orig.T.shape)
+    print('shape X_test_orig.T',X_test_orig,X_test_orig.T.shape)
+
+    return (X_train_orig.T, X_test_orig.T, Y_train_orig, Y_test_orig)
 
 ######################Convert labes vector to one-hot######################
 def convert_to_one_hot(Y, C):
@@ -465,7 +576,7 @@ def predict(X, parameters,seg_size):
     return prediction
 
 ####################Training the neural net model in Tensorflow#########################
-def model(X_train, Y_train, X_test, Y_test, seg_size, learning_rate=0.00001,
+def model(X_train, Y_train, X_test, Y_test, seg_size, learning_rate=0.0001,
           num_epochs=1500, minibatch_size=2, print_cost=True):
     """
     Implements a three-layer tensorflow neural network: LINEAR->RELU->LINEAR->RELU->LINEAR->SOFTMAX.
@@ -528,14 +639,26 @@ def model(X_train, Y_train, X_test, Y_test, seg_size, learning_rate=0.00001,
         parameters = sess.run(parameters)
         print("Parameters have been trained!")
 
-        # Calculate the correct predictions
         correct_prediction = tf.equal(tf.argmax(final_Z), tf.argmax(Y))
+
+        predict_op = tf.argmax(final_Z)
+
+        predictions, labels_train= sess.run([predict_op, tf.argmax(Y)], feed_dict = {X: X_test, Y: Y_test})
+        print(predictions, labels_train)
+
+        # Calculate the correct predictions
+        #correct_prediction = tf.equal(tf.argmax(final_Z), tf.argmax(Y))
 
         # Calculate accuracy on the test set
         accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
         print("Train Accuracy:", accuracy.eval({X: X_train, Y: Y_train}))
         print("Test Accuracy:", accuracy.eval({X: X_test, Y: Y_test}))
+
+        confusion = tf.confusion_matrix(labels=tf.argmax(Y), predictions=predict_op, num_classes=5)
+        confusion_mat = confusion.eval({Y: Y_test,X: X_test})
+
+        print(confusion_mat)
 
         return parameters
 
@@ -657,13 +780,22 @@ def main():
     # X_orig,Y_orig  = padding(points,padding_size,labels)
 
     # Method 2: segmented trips feed to NN
-    points_segmented = segmentation(points, seg_size)
-    X_orig, Y_orig = XY_preparation(points_segmented, seg_size)
+    points, labels, num_points_per_trip = read_db(points_table, labels_table)
+    points_segmented = segmentation(points, seg_size, num_points_per_trip)
+    X_orig, Y_orig = XY_preparation(points_segmented, labels, seg_size, num_channels)
+
+    print(X_orig.shape, Y_orig.shape)
+
+    #load data from npy files
+    # Y_orig = np.load('DNN_labels_data.npy')
+    # X_orig = np.load('DNN_segmented_data.npy')
+    #print(X_orig.shape, Y_orig.shape)
     X_flatten = flattening_data(X_orig)
     X_train, X_test, Y_train, Y_test = split_train_test(X_flatten, Y_orig)
+    #print(X_train.shape, X_test.shape, Y_train.shape, Y_test.shape)
     Y_train = convert_to_one_hot(Y_train, 5)
     Y_test = convert_to_one_hot(Y_test, 5)
-    parameters = model(X_train, Y_train, X_test, Y_test, seg_size)
+    parameters = model(X_test, Y_test, X_test, Y_test, seg_size)
 
     print("--- %s seconds ---" % (time.time() - start_time))
 
